@@ -37,14 +37,12 @@
 // PIN 2 -> PE4
 #define RESET_BUTTON_PORT PORTE
 #define RESET_BUTTON_BIT 4
-// PIN 4 -> PG5
-#define WATER_SENSOR_POWER_PORT PORTG
-#define WATER_SENSOR_POWER_BIT 5
-// PIN 5 -> PH5
-#define FAN_PORT PORTE
-#define FAN_BIT 3
-
-#define WATER_SENSOR_PIN A0
+// PIN 36 -> PC1
+#define WATER_SENSOR_POWER_PORT PORTC
+#define WATER_SENSOR_POWER_BIT 1
+// PIN 37 -> PC0
+#define FAN_PORT PORTC
+#define FAN_BIT 0
 
 // Device Pin Definitions
 #define STEPPER_IN1 9
@@ -72,7 +70,7 @@ Stepper ventStepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, S
 DHT dht(TEMP_HUMID_PIN, DHTTYPE);
 
 // RTC setup
-RTC_DS3231 rtc;
+RTC_DS1307 rtc;
 
 // LCD setup
 LiquidCrystal lcd(LCD_RS, LCD_EN, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
@@ -86,7 +84,7 @@ volatile float currentTemp = 0.0;
 volatile float currentHumidity = 0.0;
 volatile bool waterLevelLow = false;
 volatile unsigned long lastUpdateTime = 0;
-volatile const unsigned long updateInterval = 60000; // 1 minute
+volatile const unsigned long updateInterval = 6000; // 6 seconds 
 
 void uartInit(unsigned long baud) {
     uint16_t ubrr = F_CPU / 16 / baud - 1;
@@ -174,8 +172,11 @@ void setup() {
         lcd.print("RTC ERROR");
         while (1); // Halt execution if RTC fails
     }
-    if (rtc.lostPower()) {
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to compile time
+    if (!rtc.isrunning()) {
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set RTC to compile time
+        lcd.clear();
+        lcd.print("RTC RESET");
+        delay(2000); // Briefly display this info
     }
 
     uartInit(9600);
@@ -203,12 +204,13 @@ void handleDisabledState() {
     if (startButtonPressed) {
         startButtonPressed = false; // Reset the flag
         currentState = IDLE;        // Transition to IDLE state
+        lcd.clear();
         logStateTransition("DISABLED", "IDLE");
         return;
     }
 
     turnOnLED(YELLOW);
-    lcd.clear();
+    lcd.setCursor(0, 0);
     lcd.print("System Disabled");
 }
 
@@ -225,20 +227,19 @@ void handleIdleState() {
 
     if (waterLevelLow) {
         currentState = ERROR;
+        lcd.clear();
         logStateTransition("IDLE", "ERROR");
         return;
     }
 
     if (currentTemp > 23.0) {
         currentState = RUNNING;
+        lcd.clear();
         logStateTransition("IDLE", "RUNNING");
         return;
     }
 
-    if (millis() - lastUpdateTime >= updateInterval) {
-        displayTempHumidity();
-        lastUpdateTime = millis();
-    }
+    displayTempHumidity();
 }
 
 void handleRunningState() {
@@ -254,20 +255,19 @@ void handleRunningState() {
 
     if (currentTemp < 21.0) {
         currentState = IDLE;
+        lcd.clear();
         logStateTransition("RUNNING", "IDLE");
         return;
     }
 
     if (waterLevelLow) {
         currentState = ERROR;
+        lcd.clear();
         logStateTransition("RUNNING", "ERROR");
         return;
     }
 
-    if (millis() - lastUpdateTime >= updateInterval) {
-        displayTempHumidity();
-        lastUpdateTime = millis();
-    }
+    displayTempHumidity();
 }
 
 void handleErrorState() {
@@ -277,28 +277,33 @@ void handleErrorState() {
 
         if (!waterLevelLow) {
             currentState = IDLE;    // Transition to IDLE state
+            lcd.clear();
             logStateTransition("ERROR", "IDLE");
             return;
         }
     }
 
     turnOnLED(RED);
-    lcd.clear();
+    lcd.setCursor(0, 0);
     lcd.print("Error: Water Low");
 }
 
 void readSensors() {
-    currentTemp = dht.readTemperature();
-    currentHumidity = dht.readHumidity();
-    readWaterSensor();
+    if (millis() - lastUpdateTime >= updateInterval) {
+        currentTemp = dht.readTemperature();
+        currentHumidity = dht.readHumidity();
+        readWaterSensor();
+        lastUpdateTime = millis();
+        lcd.clear();
+    }
 }
 
 void readWaterSensor() {
-    //PORTC |= (1 << WATER_SENSOR_POWER_PIN);
-    _delay_ms(10);
+    GPIO_WRITE_HIGH(WATER_SENSOR_POWER_PORT, WATER_SENSOR_POWER_BIT);
+    _delay_ms(50);
     uint16_t adcValue = adcRead(0);
     waterLevelLow = adcValue < 500;
-    //PORTC &= ~(1 << WATER_SENSOR_POWER_PIN);
+    GPIO_WRITE_LOW(WATER_SENSOR_POWER_PORT, WATER_SENSOR_POWER_BIT);
 }
 
 void adjustVent() {
@@ -308,51 +313,21 @@ void adjustVent() {
 }
 
 void displayTempHumidity() {
-    lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Temp: ");
     lcd.print(currentTemp);
     lcd.print("C");
     lcd.setCursor(0, 1);
-    lcd.print("Hum: ");
+    lcd.print("Hum:  ");
     lcd.print(currentHumidity);
     lcd.print("%");
 }
 
-void displayCurrentTime() {
-    DateTime now = rtc.now(); // Get the current time
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Time: ");
-    if (now.hour() < 10) lcd.print("0");
-    lcd.print(now.hour());
-    lcd.print(":");
-    if (now.minute() < 10) lcd.print("0");
-    lcd.print(now.minute());
-
-    lcd.setCursor(0, 1);
-    lcd.print("Date: ");
-    if (now.month() < 10) lcd.print("0");
-    lcd.print(now.month());
-    lcd.print("/");
-    if (now.day() < 10) lcd.print("0");
-    lcd.print(now.day());
-    lcd.print("/");
-    lcd.print(now.year());
-}
-
 void logTimestamp() {
     DateTime now = rtc.now();
-    uartPrint("[");
-    if (now.hour() < 10) uartPrint("0");
-    uartTransmit('0' + now.hour());
-    uartPrint(":");
-    if (now.minute() < 10) uartPrint("0");
-    uartTransmit('0' + now.minute());
-    uartPrint(":");
-    if (now.second() < 10) uartPrint("0");
-    uartTransmit('0' + now.second());
-    uartPrint("] ");
+    char buffer[20];
+    sprintf(buffer, "[%02d:%02d:%02d] ", now.hour(), now.minute(), now.second());
+    uartPrint(buffer);
 }
 
 void turnOnLED(Color color) {
