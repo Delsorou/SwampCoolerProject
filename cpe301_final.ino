@@ -2,7 +2,6 @@
 // Restrictions: Direct register manipulation, only allowed Arduino libraries for specific components
 
 #include <Stepper.h>
-#include <Wire.h>       // For RTC
 #include <DHT.h>        // For temp/humidity sensor
 #include <RTClib.h>     // For RTC module
 #include <LiquidCrystal.h> // For LCD display
@@ -40,9 +39,9 @@
 // PIN 36 -> PC1
 #define WATER_SENSOR_POWER_PORT PORTC
 #define WATER_SENSOR_POWER_BIT 1
-// PIN 37 -> PC0
-#define FAN_PORT PORTC
-#define FAN_BIT 0
+// PIN 8 -> PH5
+#define FAN_PORT PORTH
+#define FAN_BIT 5
 
 // Device Pin Definitions
 #define STEPPER_IN1 9
@@ -62,7 +61,7 @@
 enum Color { RED, GREEN, BLUE, YELLOW };
 
 // Stepper motor setup
-const int stepsPerRevolution = 200;
+const int stepsPerRevolution = 2048;
 Stepper ventStepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4);
 
 // DHT sensor setup
@@ -84,7 +83,9 @@ volatile float currentTemp = 0.0;
 volatile float currentHumidity = 0.0;
 volatile bool waterLevelLow = false;
 volatile unsigned long lastUpdateTime = 0;
-volatile const unsigned long updateInterval = 6000; // 6 seconds 
+const unsigned long updateInterval = 6000; // 6 seconds
+const unsigned long stepInterval = 100; // Minimum time between steps (in milliseconds)
+
 
 void uartInit(unsigned long baud) {
     uint16_t ubrr = F_CPU / 16 / baud - 1;
@@ -162,10 +163,11 @@ void setup() {
     GPIO_SET_OUTPUT(WATER_SENSOR_POWER_PORT, WATER_SENSOR_POWER_BIT);
     GPIO_WRITE_LOW(WATER_SENSOR_POWER_PORT, WATER_SENSOR_POWER_BIT); // Ensure sensor is initialized off
 
-    ventStepper.setSpeed(60);
-    dht.begin();
+    // Configure fan pin
+    GPIO_SET_OUTPUT(FAN_PORT, FAN_BIT);
+
     lcd.begin(16, 2);
-    lcd.print("System Starting");
+    dht.begin();
 
     if (!rtc.begin()) {
         lcd.clear();
@@ -174,9 +176,6 @@ void setup() {
     }
     if (!rtc.isrunning()) {
         rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set RTC to compile time
-        lcd.clear();
-        lcd.print("RTC RESET");
-        delay(2000); // Briefly display this info
     }
 
     uartInit(9600);
@@ -184,6 +183,7 @@ void setup() {
 }
 
 void loop() {
+
     switch (currentState) {
         case DISABLED:
             handleDisabledState();
@@ -198,6 +198,14 @@ void loop() {
             handleErrorState();
             break;
     }
+}
+
+void simulateShittyDHT() {
+    // Toggle currentTemp between values above and below setpoint to simulate
+    // state transition
+    if (currentTemp == 0.0) {
+        currentTemp = 30.0;
+    } else currentTemp = 0.0;
 }
 
 void handleDisabledState() {
@@ -218,6 +226,7 @@ void handleIdleState() {
     if (stopButtonPressed) {
         stopButtonPressed = false;  // Reset the flag
         currentState = DISABLED;    // Transition to DISABLED state
+        lcd.clear();
         logStateTransition("IDLE", "DISABLED");
         return;
     }
@@ -240,12 +249,15 @@ void handleIdleState() {
     }
 
     displayTempHumidity();
+    adjustVent();
 }
 
 void handleRunningState() {
     if (stopButtonPressed) {
         stopButtonPressed = false;  // Reset the flag
         currentState = DISABLED;    // Transition to DISABLED state
+        GPIO_WRITE_LOW(FAN_PORT, FAN_BIT);
+        lcd.clear();
         logStateTransition("RUNNING", "DISABLED");
         return;
     }
@@ -255,6 +267,7 @@ void handleRunningState() {
 
     if (currentTemp < 21.0) {
         currentState = IDLE;
+        GPIO_WRITE_LOW(FAN_PORT, FAN_BIT);
         lcd.clear();
         logStateTransition("RUNNING", "IDLE");
         return;
@@ -262,12 +275,15 @@ void handleRunningState() {
 
     if (waterLevelLow) {
         currentState = ERROR;
+        GPIO_WRITE_LOW(FAN_PORT, FAN_BIT);
         lcd.clear();
         logStateTransition("RUNNING", "ERROR");
         return;
     }
 
+    GPIO_WRITE_HIGH(FAN_PORT, FAN_BIT);
     displayTempHumidity();
+    adjustVent();
 }
 
 void handleErrorState() {
@@ -290,11 +306,15 @@ void handleErrorState() {
 
 void readSensors() {
     if (millis() - lastUpdateTime >= updateInterval) {
-        currentTemp = dht.readTemperature();
+//        currentTemp = dht.readTemperature();
+        // DHT sensor is shitty and does not work
+        simulateShittyDHT();
+
         currentHumidity = dht.readHumidity();
         readWaterSensor();
         lastUpdateTime = millis();
         lcd.clear();
+        
     }
 }
 
@@ -307,9 +327,28 @@ void readWaterSensor() {
 }
 
 void adjustVent() {
+    static unsigned long lastStepTime = 0; // Track the last time a step was issued
     uint16_t potValue = adcRead(1); // Read from ADC channel 1 (Potentiometer)
-    int steps = map(potValue, 0, 1023, 0, stepsPerRevolution); // Map potentiometer value to step range
-    ventStepper.step(steps - stepsPerRevolution / 2); // Adjust vent position
+
+    // Define midpoint and dead zone
+    const uint16_t midpoint = 512;
+    const uint16_t deadZone = 100;
+
+    // Check for the dead zone
+    if (potValue > (midpoint - deadZone) && potValue < (midpoint + deadZone)) {
+        return; // No movement within the dead zone
+    }
+
+    // Only step if enough time has passed
+    if (millis() - lastStepTime >= stepInterval) {
+        // Calculate direction
+        int direction = (potValue < midpoint) ? 1 : -1;
+
+        ventStepper.setSpeed(10);
+        ventStepper.step(direction * 10); // Move a small step in the chosen direction
+
+        lastStepTime = millis(); // Update the last step time
+    }
 }
 
 void displayTempHumidity() {
